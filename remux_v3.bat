@@ -2,12 +2,20 @@
 setlocal enabledelayedexpansion
 
 REM ================================================================
-REM  MKV -> MP4 remux + subtitle sidecar extraction for Plex  (v3)
+REM  MKV -> MP4 remux for PRIMARY MEDIA  (movies / episodes)
+REM
+REM  Pair script: remux_extras.bat  (featurettes, trailers, etc.)
+REM  Point BOTH at the same folder. This one skips anything inside a
+REM  Plex extras folder; the other one only does those. Nothing needs
+REM  to be moved.
 REM
 REM  - Video ALWAYS stream-copied: no quality loss, 4K/HDR safe
 REM  - HEVC tagged hvc1 so Apple clients will direct play
 REM  - Audio copied when already MP4-native, else -> E-AC-3
-REM  - ALL subtitle tracks extracted to sidecars, Plex-named
+REM  - ALL subtitle tracks extracted to sidecars, Plex-named, in ONE
+REM    ffmpeg pass (+ one mkvextract pass for VobSub) instead of one
+REM    process per track - this is the slow part on big files, and
+REM    batching it turns N full reads of the file into 1
 REM  - Output VERIFIED against source duration before any delete
 REM  - Original is NEVER deleted if a subtitle track failed to
 REM    extract (those subs would be gone forever)
@@ -39,6 +47,23 @@ REM   data survives so you can OCR later with Subtitle Edit.
 REM   Set to 0 only if you truly do not want them.
 set "EXTRACT_IMAGE_SUBS=1"
 
+REM MKVEXTRACT_PATH: full path to mkvextract.exe if it is NOT on your
+REM   PATH - e.g. a PortableApps.com install. Leave blank to search
+REM   PATH normally. Only needed for VobSub (DVD) subtitle tracks;
+REM   everything else uses ffmpeg.
+REM   NOTE: do NOT put quotes around the path here. The set "X=Y" form
+REM   already handles spaces. Inner quotes break it - cmd takes
+REM   everything between the FIRST and LAST quote on the line, so
+REM   set "X="C:\a b\x.exe"  assigns  X = "C:\a b\x.exe  (leading
+REM   quote, no trailing one) and every exist-check then fails.
+REM   PortableApps nests its binaries - verify with:
+REM     dir "...\MKVToolNixPortable\App\mkvtoolnix\mkvextract.exe"
+set "MKVEXTRACT_PATH="
+
+REM STOPFILE: create an empty file with this name next to the
+REM   script to stop cleanly after the current file finishes.
+set "STOPFILE=%~dp0STOP"
+
 REM Max allowed source/output duration difference, in seconds
 set "DURATION_TOLERANCE=2"
 REM -----------------------------------------
@@ -51,6 +76,19 @@ if "%~1"=="" (
     echo   EXTRACT_SUBS       = %EXTRACT_SUBS%
     echo   SUB_ASS_MODE       = %SUB_ASS_MODE%
     echo   EXTRACT_IMAGE_SUBS = %EXTRACT_IMAGE_SUBS%
+    echo   MKVEXTRACT_PATH    = %MKVEXTRACT_PATH%
+    echo.
+REM ---- runtime controls (see also: STOP file, below) ----
+REM   Ctrl+C          stop now. Kills ffmpeg mid-write; the partial
+REM                   .mp4 is cleaned up and the MKV is kept. Answer
+REM                   Y to "Terminate batch job".
+REM   STOP file       stop CLEANLY after the current file finishes.
+REM                   Create an empty file named STOP next to this
+REM                   script. Checked before each file.
+REM   Esc             un-freeze the window if you clicked in it.
+REM                   QuickEdit mode pauses ALL output on click and
+REM                   looks exactly like a hang.
+REM   Pause / Ctrl+S  pause output. Any key / Ctrl+Q resumes.
     pause
     exit /b
 )
@@ -71,14 +109,91 @@ if errorlevel 1 (
 REM mkvextract is optional - only needed for DVD/VobSub subtitles,
 REM which ffmpeg physically cannot write (it has no vobsub muxer).
 set "HAVE_MKVEXTRACT=1"
-where mkvextract >nul 2>&1
-if errorlevel 1 set "HAVE_MKVEXTRACT=0"
+set "MKVEXTRACT_EXE=mkvextract"
+if defined MKVEXTRACT_PATH (
+    if exist "%MKVEXTRACT_PATH%" (
+        set "MKVEXTRACT_EXE="%MKVEXTRACT_PATH%""
+    ) else (
+        echo NOTE: MKVEXTRACT_PATH is set but not found on disk:
+        echo       %MKVEXTRACT_PATH%
+        set "HAVE_MKVEXTRACT=0"
+    )
+) else (
+    where mkvextract >nul 2>&1
+    if errorlevel 1 set "HAVE_MKVEXTRACT=0"
+)
 if "%HAVE_MKVEXTRACT%"=="0" (
     echo NOTE: mkvextract not found. DVD/VobSub subtitle tracks cannot
     echo       be extracted and those MKVs will be kept, not deleted.
-    echo       Install MKVToolNix if your rips are from DVD.
+    echo       If you have a portable MKVToolNix install, set
+    echo       MKVEXTRACT_PATH near the top of this script to its
+    echo       mkvextract.exe instead of relying on PATH.
     echo.
 )
+
+REM ================================================================
+REM  Pre-flight: find any path containing '!' before doing real work.
+REM
+REM  Why this cannot live in :process - the rest of this script needs
+REM  delayed expansion, and in
+REM      for /R "%~1" %%F in (*.mkv) do call :process "%%F"
+REM  cmd substitutes %%F FIRST and runs delayed expansion SECOND. The
+REM  '!' is stripped before :process is ever called, so by then the
+REM  path is already wrong and there is nothing left to detect. The
+REM  check has to happen here, with delayed expansion OFF - that is
+REM  the only state in which a literal '!' survives at all.
+REM
+REM  Such files fail SAFE: ffprobe cannot open the mangled path, the
+REM  file is skipped, and the MKV is never deleted. But the error is
+REM  misleading and would scroll past unnoticed in a big run.
+REM
+REM  Nothing here touches the conversion path, so it cannot break a
+REM  file that already works. Cost is one directory walk per run.
+REM ================================================================
+setlocal disabledelayedexpansion
+set "BANGLIST=%TEMP%\bang_%RANDOM%.txt"
+set "ALLLIST=%TEMP%\all_%RANDOM%.txt"
+if exist "%~1\" (
+    dir /b /s "%~1\*.mkv" > "%ALLLIST%" 2>nul
+) else (
+    dir /b /s "%~1" > "%ALLLIST%" 2>nul
+)
+findstr /L /C:"!" "%ALLLIST%" > "%BANGLIST%" 2>nul
+set "BANGSIZE=0"
+for %%S in ("%BANGLIST%") do set "BANGSIZE=%%~zS"
+del /f /q "%ALLLIST%" >nul 2>&1
+if %BANGSIZE% EQU 0 goto :bang_clear
+
+echo.
+echo ================================================================
+echo   WARNING - these paths contain an exclamation mark:
+echo ================================================================
+type "%BANGLIST%"
+echo.
+echo   cmd strips '!' from a path before this script can open it, so
+echo   these CANNOT be converted. Nothing is lost - each one is
+echo   skipped and its MKV is never deleted - but they will not
+echo   convert, and the error they produce looks like a missing file.
+echo.
+echo   Rename them without the '!' and re-run. Plex matches
+echo   Mamma Mia 2018 exactly as well as Mamma Mia! 2018.
+echo.
+choice /C YN /N /M "  Continue anyway, skipping them? [Y/N] "
+if errorlevel 2 goto :bang_abort
+goto :bang_clear
+
+:bang_abort
+del /f /q "%BANGLIST%" >nul 2>&1
+endlocal
+echo.
+echo Aborted - nothing was changed.
+pause
+exit /b
+
+:bang_clear
+del /f /q "%BANGLIST%" >nul 2>&1
+endlocal
+
 
 set /a COUNT_OK=0
 set /a COUNT_FAIL=0
@@ -104,6 +219,11 @@ echo   Failed              : !COUNT_FAIL!
 echo   Text subs extracted : !TOTAL_TEXT_SUBS!
 echo   Image subs saved    : !TOTAL_IMAGE_SUBS!
 echo ================================================
+if exist "%STOPFILE%" (
+    del /f /q "%STOPFILE%" >nul 2>&1
+    echo.
+    echo NOTE: STOP file was found and has been removed.
+)
 
 if !TOTAL_IMAGE_SUBS! GTR 0 (
     echo.
@@ -131,13 +251,37 @@ exit /b
 
 REM ================================================================
 :process
+if exist "%STOPFILE%" (
+    if not defined STOP_ANNOUNCED (
+        set "STOP_ANNOUNCED=1"
+        echo.
+        echo ================================================
+        echo   STOP file found - skipping all remaining files.
+        echo ================================================
+    )
+    exit /b
+)
 set "input=%~1"
 set "output=%~dpn1.mp4"
 set "subbase=%~dpn1"
 set "psinput=%input:'=''%"
 
+REM Use a variable + delayed expansion rather than echoing %~nx1
+REM directly: percent expansion happens before cmd parses special
+REM characters, so a file called "Fast & Furious.mkv" would echo
+REM "Processing: Fast" and then try to RUN "Furious.mkv". Delayed
+REM expansion resolves after parsing and is immune.
+set "fname=%~nx1"
 echo ------------------------------------------------
-echo Processing: %~nx1
+echo Processing: !fname!
+
+REM ---- skip anything living in a Plex extras folder ----
+call :check_extra "%input%"
+if "!IS_EXTRA!"=="1" (
+    echo   SKIP: inside extras folder "!pdir!" - run remux_extras.bat for this.
+    set /a COUNT_SKIP+=1
+    exit /b
+)
 
 if exist "%output%" (
     echo   SKIP: "%~n1.mp4" already exists.
@@ -204,6 +348,10 @@ if "%KEEP_ALL_AUDIO%"=="1" set "amap=-map 0:a"
 echo   Video : !vcodec! (stream copy) !vtag!
 echo   Audio : !acodec! / !achans!ch  ==^>  !aopts!
 
+echo   Remuxing. Progress reaches 100%% and then goes SILENT for a
+echo   while - that is +faststart's second pass moving the moov atom
+echo   to the front, which re-reads and rewrites the whole output.
+echo   Minutes on a large file. This is normal. Do not kill it.
 REM ---------------- remux ----------------
 REM -sn: no subtitles in the MP4 at all. They live in sidecars now.
 ffmpeg -y -hide_banner -loglevel warning -stats -i "%input%" ^
@@ -284,14 +432,51 @@ exit /b
 
 
 REM ================================================================
+REM  Decide whether a file lives inside a Plex "extras" folder.
+REM  Plex recognises exactly these eight directory names, and they
+REM  always sit directly above the extra itself:
+REM      Movie (Year)\Featurettes\Making Of.mkv
+REM      Show (Year)\Season 01\Behind The Scenes\Look Back.mkv
+REM  So the file's immediate parent is all we need to test.
+REM  Sets IS_EXTRA=1 or 0, and pdir to the parent folder name.
+REM ================================================================
+:check_extra
+set "IS_EXTRA=0"
+set "pd=%~dp1"
+set "pd=!pd:~0,-1!"
+for %%P in ("!pd!") do set "pdir=%%~nxP"
+
+if /I "!pdir!"=="Behind The Scenes" set "IS_EXTRA=1"
+if /I "!pdir!"=="Deleted Scenes"    set "IS_EXTRA=1"
+if /I "!pdir!"=="Featurettes"       set "IS_EXTRA=1"
+if /I "!pdir!"=="Interviews"        set "IS_EXTRA=1"
+if /I "!pdir!"=="Scenes"            set "IS_EXTRA=1"
+if /I "!pdir!"=="Shorts"            set "IS_EXTRA=1"
+if /I "!pdir!"=="Trailers"          set "IS_EXTRA=1"
+if /I "!pdir!"=="Other"             set "IS_EXTRA=1"
+exit /b
+
+
+REM ================================================================
 REM  Extract every subtitle track to a Plex-named sidecar.
 REM
 REM  Plex wants:  <video basename>.<lang>[.forced][.sdh].<ext>
 REM  Language is ISO-639-1 (2 letter) or ISO-639-2/B (3 letter).
 REM  ffprobe reports 639-2/B, so it is used verbatim.
+REM
+REM  PERFORMANCE: this used to spawn one ffmpeg (or mkvextract) call
+REM  PER subtitle track. Each call demuxes the whole container even
+REM  though it only wants a tiny subtitle stream, so N tracks meant
+REM  N full reads of a multi-GB file. This version does a single
+REM  decision pass (probe + pick filenames, no extraction yet), then
+REM  fires exactly ONE ffmpeg call covering every text/PGS track and
+REM  ONE mkvextract call covering every VobSub track.
 REM ================================================================
 :extract_subs
 set /a sidx=0
+set /a qn=0
+set "FFMPEG_SUBARGS="
+set "MKV_SUBARGS="
 
 :subloop
 set "scodec="
@@ -309,7 +494,7 @@ for /f "usebackq tokens=1,* delims==" %%A in (`ffprobe -v error -select_streams 
 )
 
 REM No codec returned means we have run past the last subtitle track.
-if not defined scodec goto :subloop_done
+if not defined scodec goto :subprobe_done
 
 if not defined slang set "slang=und"
 if /I "!slang!"=="unknown" set "slang=und"
@@ -323,6 +508,7 @@ REM ---- decide container + codec per subtitle format ----
 set "sext="
 set "senc="
 set "simage=0"
+set "svobsub=0"
 
 REM Text formats that are already SubRip: copy out losslessly.
 if /I "!scodec!"=="subrip" set "sext=srt"
@@ -381,55 +567,104 @@ if "!simage!"=="1" if "%EXTRACT_IMAGE_SUBS%"=="0" (
     goto :subnext
 )
 
-REM ---- build target filename, avoiding collisions ----
+REM ---- build target filename, avoiding collisions against disk
+REM      AND against other tracks already queued THIS run (nothing
+REM      is written yet, so an exist-check alone can't catch two
+REM      tracks in the same file wanting the same name) ----
 set "starget=!subbase!.!slang!!sflag!.!sext!"
 set /a dupn=1
+
 :dupcheck
-if exist "!starget!" (
+set "collision=0"
+if exist "!starget!" set "collision=1"
+if !collision! EQU 0 if !qn! GTR 0 (
+    set /a qmax=qn-1
+    for /l %%K in (0,1,!qmax!) do (
+        call set "prevtarget=%%Q_TARGET_%%K%%"
+        if /I "!prevtarget!"=="!starget!" set "collision=1"
+    )
+)
+if !collision! EQU 1 (
     set /a dupn+=1
     set "starget=!subbase!.!slang!!sflag!.!dupn!.!sext!"
     goto :dupcheck
 )
 
+REM ---- queue this track (no extraction yet) ----
+set "Q_TARGET_%qn%=!starget!"
+set "Q_SIMAGE_%qn%=!simage!"
+set "Q_SLANG_%qn%=!slang!"
+set "Q_SCODEC_%qn%=!scodec!"
+set "Q_SIDX_%qn%=!sidx!"
+
 if "!svobsub!"=="1" (
-    mkvextract tracks "%input%" !sindex!:"!starget!" >nul 2>&1
+    set "MKV_SUBARGS=!MKV_SUBARGS! !sindex!:"!starget!""
 ) else (
-    ffmpeg -y -hide_banner -loglevel error -i "%input%" -map 0:s:!sidx! !senc! "!starget!" >nul 2>&1
+    set "FFMPEG_SUBARGS=!FFMPEG_SUBARGS! -map 0:s:!sidx! !senc! "!starget!""
 )
 
-if errorlevel 1 (
-    echo   Sub s:!sidx! [!slang!] !scodec! - EXTRACT FAILED
-    if exist "!starget!" del /f /q "!starget!" >nul 2>&1
-    set /a SUB_FAILED+=1
-    goto :subnext
-)
-if not exist "!starget!" (
-    echo   Sub s:!sidx! [!slang!] !scodec! - EXTRACT FAILED ^(no output^)
-    set /a SUB_FAILED+=1
-    goto :subnext
-)
-
-REM Discard empty tracks - some MKVs carry placeholder subtitle
-REM streams with no actual cues in them.
-set "ssize=0"
-for %%S in ("!starget!") do set "ssize=%%~zS"
-if !ssize! LSS 32 (
-    echo   Sub s:!sidx! [!slang!] !scodec! - empty track, discarded
-    del /f /q "!starget!" >nul 2>&1
-    goto :subnext
-)
-
-for %%N in ("!starget!") do echo   Sub s:!sidx! [!slang!] !scodec! -^> %%~nxN
-if "!simage!"=="1" (
-    set /a TOTAL_IMAGE_SUBS+=1
-    echo !starget!>>"%OCR_LIST%"
-) else (
-    set /a TOTAL_TEXT_SUBS+=1
-)
+set /a qn+=1
 
 :subnext
 set /a sidx+=1
 goto :subloop
 
-:subloop_done
+:subprobe_done
+if !qn! EQU 0 exit /b
+
+echo   Extracting !qn! subtitle track^(s^) in a single pass...
+
+REM Batching means one bad track aborts the whole call and takes the
+REM other tracks with it, so keep stderr instead of discarding it -
+REM it is the only place the reason ever appears. Shown only on
+REM failure; silent when everything works.
+set "SUBLOG=%TEMP%\sublog_%RANDOM%.txt"
+set /a SUB_TOOL_ERR=0
+
+if defined FFMPEG_SUBARGS (
+    ffmpeg -y -hide_banner -loglevel error -i "%input%" !FFMPEG_SUBARGS! >"!SUBLOG!" 2>&1
+    if errorlevel 1 set /a SUB_TOOL_ERR=1
+)
+if defined MKV_SUBARGS (
+    !MKVEXTRACT_EXE! tracks "%input%" !MKV_SUBARGS! >>"!SUBLOG!" 2>&1
+    if errorlevel 1 set /a SUB_TOOL_ERR=1
+)
+
+if !SUB_TOOL_ERR! EQU 1 (
+    echo   ---- extraction tool reported an error ----
+    if exist "!SUBLOG!" type "!SUBLOG!"
+    echo   -------------------------------------------
+)
+if exist "!SUBLOG!" del /f /q "!SUBLOG!" >nul 2>&1
+
+REM ---- verify each queued track and tally results ----
+set /a qmax=qn-1
+for /l %%K in (0,1,!qmax!) do (
+    call set "t=%%Q_TARGET_%%K%%"
+    call set "tsimage=%%Q_SIMAGE_%%K%%"
+    call set "tslang=%%Q_SLANG_%%K%%"
+    call set "tscodec=%%Q_SCODEC_%%K%%"
+    call set "tsidx=%%Q_SIDX_%%K%%"
+
+    if not exist "!t!" (
+        echo   Sub s:!tsidx! [!tslang!] !tscodec! - EXTRACT FAILED ^(no output^)
+        set /a SUB_FAILED+=1
+    ) else (
+        set "ssize=0"
+        for %%S in ("!t!") do set "ssize=%%~zS"
+        if !ssize! LSS 32 (
+            echo   Sub s:!tsidx! [!tslang!] !tscodec! - empty track, discarded
+            del /f /q "!t!" >nul 2>&1
+        ) else (
+            for %%N in ("!t!") do echo   Sub s:!tsidx! [!tslang!] !tscodec! -^> %%~nxN
+            if "!tsimage!"=="1" (
+                set /a TOTAL_IMAGE_SUBS+=1
+                echo !t!>>"%OCR_LIST%"
+            ) else (
+                set /a TOTAL_TEXT_SUBS+=1
+            )
+        )
+    )
+)
+
 exit /b

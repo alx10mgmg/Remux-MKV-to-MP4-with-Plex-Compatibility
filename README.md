@@ -1,90 +1,253 @@
-# Remux-MKV-to-MP4-with-Plex-Compatibility
+# Remux MKV to MP4 for Plex (Windows Batch Scripts)
 
 [![Windows](https://img.shields.io/badge/Windows-only-blue)](https://www.microsoft.com/windows/)
 [![ffmpeg](https://img.shields.io/badge/requires-ffmpeg-green)](https://ffmpeg.org/)
 
+Two Windows batch scripts that remux `.mkv` files to `.mp4` for better Plex Direct Play behavior, with safety checks designed to prevent accidental media loss.
 
-This .bat file uses ffmpeg to remux .mkv files with proper audio and video codecs, containing them in a .mp4 container, extracting all subtitle tracks into appropriate sidecar .srt files, and finally deleting the main .mkv file after verification that the process was completed successfully.
+This repo is split into two workflows:
 
-There are variables to change the delete mode (keep, recycle, permanant), number of audio tracks kept, subtitle extraction preference, subtitle extraction type, image subtitle extraction preference, and tolerance between the input and output duration. The AI explanation below delves into this further as well as how to edit these variables.
+- **`remux_media.bat`** → primary media (movies/episodes)
+- **`remux_extras.bat`** → Plex extras (featurettes, trailers, interviews, etc.)
 
-FFMpeg is required, follow the instalation instructions on how to instal that before running. To validate ffmpeg is installed properly for the script run the following in an administer privalaged command prompt.
+Run both against the same library root if you want complete coverage. Each script intentionally handles a different content type.
 
-ffmpeg -version
+---
 
-MKVToolNix is used, but only for bitmap subtitles (PGS or VodSub). This is a somewhat rare edge case and is an optional requirement. That said, it is still recommended.
+## Why this exists
 
-This remuxing script was created to properly remux .mkv files for Plex, the Playstation 5 Plex app specifically. Not only is this turning unsupported .mkv files into .mp4's, but it is also editing the audio codecs into a supported format; this script turns non-supported audio codecs into EAC3. Supported codecs like AAC are recognized and audio remuxing copies the original audio file directly into the new container.
+Some Plex clients (notably Apple ecosystem clients and some console app scenarios) are picky about container/codec combinations and subtitle behavior. These scripts aim to:
 
-**A deeper AI generated explaination of the .bat file is as follows:**
+- Keep video untouched (stream copy)
+- Maximize Direct Play compatibility
+- Preserve subtitle data outside the container (for main media)
+- Verify output before any delete action is allowed
 
-A single-file Windows batch script that repackages MKV files into MP4 **without re-encoding the video**, and pulls every subtitle track out into Plex-named sidecar files.
+---
 
-The goal is Direct Play: MP4 + a codec your client already speaks means Plex streams the file untouched instead of burning CPU on a transcode.
+## What the scripts do
 
-## Truncated Instructions
+## Shared behavior (both scripts)
 
-1. Install ffmpeg
-2. Drag .mkv media file onto .bat file script
-3. Check output
+- Recursively process `.mkv` files when given a folder.
+- Skip files when output `.mp4` already exists (safe re-runs).
+- Video is always stream-copied (`-c:v copy`) — no re-encode, no quality loss.
+- HEVC/H.265 video is tagged as `hvc1` in MP4 (`-tag:v hvc1`) for Apple compatibility.
+- Audio:
+  - Copied if already MP4-friendly (`aac`, `ac3`, `eac3`)
+  - Otherwise transcoded to E-AC-3 with channel-aware bitrate:
+    - mono → 128k
+    - stereo → 256k
+    - 5.1+ → 640k
+- Chapters are preserved (`-map_chapters 0`).
+- `+faststart` is applied so MP4 metadata is front-loaded for better seeking/start.
+- Output is validated by duration check (`DURATION_TOLERANCE`) before deletion is considered.
+- `DELETE_MODE` controls how originals are handled (`keep`, `recycle`, `permanent`).
 
-## What it does
+---
 
-- **Video is always stream-copied.** No quality loss, no re-encode. 4K and HDR pass through intact.
-- **HEVC gets tagged `hvc1`.** ffmpeg defaults to `hev1`, which Apple TV / iOS / macOS refuse to direct play. Same bitstream, different fourcc.
-- **Audio is copied** when it's already MP4-native (AAC / AC-3 / E-AC-3). Anything else (DTS, TrueHD, FLAC, Opus…) is converted to E-AC-3 at a bitrate matched to the channel count.
-- **Every subtitle track is extracted** to a sidecar named the way Plex expects: `Movie.eng.forced.srt`, `Movie.jpn.ass`, etc. Text subs become `.srt` or `.ass`; bitmap subs (PGS/VobSub) are saved raw as `.sup`/`.idx`.
-- **Chapters are preserved**, and `+faststart` is applied for instant seeking.
-- **Output is verified** against the source duration before anything is deleted.
+## `remux_media.bat` (movies / episodes)
+
+This is the **main script** for normal library content.
+
+### Subtitle behavior (main differentiator)
+
+- Extracts subtitle tracks to sidecar files named for Plex conventions:
+  - `Movie.eng.srt`
+  - `Movie.eng.forced.srt`
+  - `Movie.eng.sdh.srt`
+  - etc.
+- Handles collision-safe naming if multiple tracks would map to the same target name.
+- Subtitle extraction is done in **batched passes** for performance:
+  - single ffmpeg pass for supported text/image tracks
+  - single mkvextract pass for VobSub/DVD subtitles when needed
+
+### Subtitle format handling
+
+- **Text subtitles**
+  - `subrip` / `srt` → `.srt` (copy)
+  - `mov_text`, `webvtt`, `text` → converted to `.srt`
+  - `ass` / `ssa`:
+    - kept as `.ass` if `SUB_ASS_MODE=ass` (default, styling preserved)
+    - converted to `.srt` if `SUB_ASS_MODE=srt` (styling lost, broader compatibility)
+- **Image subtitles**
+  - PGS / DVB subtitle streams can be saved as `.sup` (if enabled)
+  - VobSub/DVD subtitles require **mkvextract** and are saved as `.idx/.sub` artifacts
+- If a subtitle track fails extraction, the script marks that file as subtitle-failed and **will not delete original MKV**.
+
+### Extras handling
+
+`remux_media.bat` **skips files** inside Plex extras folders:
+- Behind The Scenes
+- Deleted Scenes
+- Featurettes
+- Interviews
+- Scenes
+- Shorts
+- Trailers
+- Other
+
+Those are handled by `remux_extras.bat`.
+
+---
+
+## `remux_extras.bat` (Plex extras only)
+
+This script processes only files whose immediate parent folder is one of the Plex extras folder names above.
+
+### Key differences from media script
+
+- No subtitle sidecar extraction.
+- All subtitle streams are dropped from output (`-sn`).
+- Same video/audio remux policy and duration safety checks as main script.
+- Intended for featurettes/trailers/interviews where sidecar subtitle handling is often less useful/unreliable in Plex extras contexts.
+
+---
+
+## Safety model
+
+The scripts are intentionally conservative.
+
+For a file to be eligible for original removal:
+
+1. ffmpeg must exit successfully
+2. output file must exist
+3. output duration must be readable
+4. output/source duration delta must be within `DURATION_TOLERANCE`
+5. (`remux_media.bat`) subtitle extraction must not have unresolved failures
+
+If any check fails, original is kept.
+
+---
 
 ## Requirements
 
-- **ffmpeg** and **ffprobe** on your `PATH` (required)
-- **mkvextract** from [MKVToolNix](https://mkvtoolnix.download/) (optional — only needed for DVD/VobSub subtitles, which ffmpeg cannot write)
+## Required
+
+- Windows (`cmd.exe` batch scripts)
+- `ffmpeg` on `PATH`
+- `ffprobe` on `PATH`
+
+Quick check:
+
+```bat
+ffmpeg -version
+ffprobe -version
+```
+
+## Optional (only for certain subtitle tracks in `remux_media.bat`)
+
+- `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
+
+Needed for VobSub/DVD subtitle extraction (`dvd_subtitle`), because ffmpeg cannot write VobSub outputs directly.
+
+You can either:
+
+- put `mkvextract` on `PATH`, or
+- set `MKVEXTRACT_PATH` in `remux_media.bat` to full `mkvextract.exe` path
+
+---
 
 ## Usage
 
-Drag an MKV file **or a folder** onto the script. Folders are scanned recursively for `.mkv`.
+## Basic
 
-Existing `.mp4` outputs are skipped, so re-running over a partially processed library is safe.
+- Drag and drop:
+  - a single `.mkv` file, or
+  - a folder
+  onto either script.
 
-## Configuration
+## Typical full-library workflow
 
-Edit the variables at the top of the file.
+- Run `remux_media.bat` on your library root.
+- Run `remux_extras.bat` on the same root.
 
-| Option | Default | Meaning |
+They are designed not to overlap destructively:
+- media script skips extras folders
+- extras script only touches extras folders
+
+---
+
+## Configuration options
+
+Edit variables at top of each script.
+
+## Common options (both scripts)
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `DELETE_MODE` | `keep` | `keep` = never touch originals · `recycle` = send to Recycle Bin · `permanent` = delete outright |
-| `KEEP_ALL_AUDIO` | `0` | `0` = first audio track only · `1` = all tracks |
-| `EXTRACT_SUBS` | `1` | Write subtitle sidecars |
-| `SUB_ASS_MODE` | `ass` | `ass` = keep styling losslessly · `srt` = convert (destroys typesetting) |
-| `EXTRACT_IMAGE_SUBS` | `1` | Save PGS/VobSub tracks as `.sup`/`.idx` |
-| `DURATION_TOLERANCE` | `2` | Max source/output duration difference, in seconds |
+| `DELETE_MODE` | `keep` | `keep` = keep MKV, `recycle` = send MKV to Recycle Bin, `permanent` = hard delete |
+| `KEEP_ALL_AUDIO` | `0` | `0` = first audio track only, `1` = keep all audio tracks |
+| `STOPFILE` | `script_dir\STOP` | Create this empty file next to script to stop cleanly after current file |
+| `DURATION_TOLERANCE` | `2` | Max allowed duration mismatch in seconds |
 
-**Run with `DELETE_MODE=keep` first** and check the results before enabling deletion.
+## `remux_media.bat` only
 
-## Safety
+| Variable | Default | Meaning |
+|---|---|---|
+| `EXTRACT_SUBS` | `1` | `1` = extract subtitle sidecars, `0` = skip subtitle extraction |
+| `SUB_ASS_MODE` | `ass` | `ass` = keep ASS/SSA styling, `srt` = convert ASS/SSA to SRT |
+| `EXTRACT_IMAGE_SUBS` | `1` | `1` = save image subtitles (`.sup`, `.idx/.sub`), `0` = skip image subtitles |
+| `MKVEXTRACT_PATH` | *(blank)* | Full path to `mkvextract.exe` if not on `PATH` |
 
-Originals are only removed when *every* check passes:
+---
 
-1. ffmpeg exits clean
-2. The output file exists and is readable
-3. Output duration matches the source within `DURATION_TOLERANCE`
-4. No subtitle track failed to extract
+## Runtime controls / stopping safely
 
-That last rule matters most — subtitles that fail to come out are gone forever once the MKV is deleted, so any failure vetoes the delete for that file. On mismatch, the suspect MP4 is left in place for inspection.
+While script is running:
 
-## Note on image subtitles
+- **Ctrl+C**: abort immediately (may interrupt active ffmpeg process)
+- **STOP file**: create empty file named `STOP` next to script for graceful stop after current file
+- **Esc / QuickEdit caution**: clicking in cmd window can freeze output in QuickEdit mode
+- **Pause / Ctrl+S**: pauses console output
 
-PGS and VobSub tracks are bitmaps, not text. Plex has to burn them in, which forces a full transcode — exactly what this script exists to avoid. They're saved so the data survives; run them through [Subtitle Edit](https://www.nikse.dk/subtitleedit) (free) to OCR them into real `.srt` files. A list of affected files is written to `%TEMP%` at theend of each run.
+---
+
+## Important path limitation (`!` exclamation mark)
+
+Both scripts perform a pre-flight scan for paths containing `!`.
+
+Reason: delayed expansion in `cmd` can mangle paths containing `!`, causing false “missing file” behavior.  
+Scripts warn and let you abort before processing. Files with `!` are skipped safely (not deleted), but should be renamed for reliable conversion.
+
+---
+
+## Output summary
+
+At end of run, scripts print totals for converted/skipped/failed.  
+`remux_media.bat` additionally reports extracted text/image subtitle counts and writes an OCR reminder list when image subs were saved.
+
+---
+
+## OCR note for image subtitles
+
+Image-based subtitles (PGS, VobSub, DVB) are not text and cannot become `.srt` without OCR.
+
+If you need searchable/editable text subtitles, OCR them with a tool such as Subtitle Edit:
+- https://www.nikse.dk/subtitleedit
+
+---
+
+## Suggested first run strategy
+
+1. Leave `DELETE_MODE=keep`
+2. Test on a small sample set
+3. Verify playback behavior in your Plex clients
+4. Then consider `recycle` or `permanent`
+
+---
 
 ## Limitations
 
-- Windows only.
-- Lossy audio conversion for non-MP4-native codecs. Lossless tracks (TrueHD, FLAC) lose their lossless-ness; if that matters, keep the MKV.
-- MP4 has no DTS/TrueHD support, hence the E-AC-3 fallback.
+- Windows batch scripting environment only.
+- Non-MP4-native audio codecs are transcoded (lossy) to E-AC-3.
+- Subtitle extraction success depends on source track validity and available tools.
+- VobSub extraction requires mkvextract.
 
-## External Resources
+---
+
+## External resources
 
 - FFmpeg: https://ffmpeg.org/
 - MKVToolNix: https://mkvtoolnix.download/
+- Subtitle Edit: https://www.nikse.dk/subtitleedit

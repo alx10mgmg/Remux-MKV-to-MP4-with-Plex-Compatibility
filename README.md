@@ -76,10 +76,15 @@ That last rule matters most — subtitles that fail to come out are gone forever
 
 ## Note on image subtitles
 
-PGS and VobSub tracks are bitmaps, not text. Plex has to burn them in, which forces a full transcode — exactly what this script exists to avoid. They're saved so the data survives; run them through [Subtitle Edit](https://www.nikse.dk/subtitleedit) (free) to OCR them into real `.srt` files. A list of affected files is written to `%TEMP%` at the end of each run.
+PGS and VobSub tracks are bitmaps, not text. Plex has to burn them in, which forces a full transcode — exactly what this script exists to avoid. They're saved so the data survives; run them through [Subtitle Edit](https://www.nikse.dk/subtitleedit) (free) to OCR them into real `.srt` files. A list of affected files is written to `%TEMP%` at theend of each run.
 
 ## Limitations
 
 - Windows only.
 - Lossy audio conversion for non-MP4-native codecs. Lossless tracks (TrueHD, FLAC) lose their lossless-ness; if that matters, keep the MKV.
 - MP4 has no DTS/TrueHD support, hence the E-AC-3 fallback.
+
+## External Resources
+
+- FFmpeg: https://ffmpeg.org/
+- MKVToolNix: https://mkvtoolnix.download/

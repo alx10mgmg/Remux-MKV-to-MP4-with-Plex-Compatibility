@@ -1,15 +1,25 @@
 # Remux-MKV-to-MP4-with-Plex-Compatibility
 This .bat file uses ffmpeg to remux .mkv files with proper audio and video codecs, containing them in a .mp4 container, extracting all subtitle tracks into appropriate sidecar .srt files, and finally deleting the main .mkv file after verification that the process was completed successfully.
 
-FFMpeg is required, follow the instalation instructions on how to instal that before running.
+FFMpeg is required, follow the instalation instructions on how to instal that before running. To validate ffmpeg is installed properly for the script run the following in an administer privalaged command prompt.
+
+ffmpeg -version
+
+MKVToolNix is used, but only for bitmap subtitles (PGS or VodSub). This is a somewhat rare edge case and is an optional requirement. That said, it is still recommended.
 
 This remuxing script was created to properly remux .mkv files for Plex, the Playstation 5 Plex app specifically. Not only is this turning unsupported .mkv files into .mp4's, but it is also editing the audio codecs into a supported format; this script turns non-supported audio codecs into EAC3. Supported codecs like AAC are recognized and audio remuxing copies the original audio file directly into the new container.
 
-**<u>A deeper AI generated explaination of the .bat file is as follows:**<u>
+**A deeper AI generated explaination of the .bat file is as follows:**
 
 A single-file Windows batch script that repackages MKV files into MP4 **without re-encoding the video**, and pulls every subtitle track out into Plex-named sidecar files.
 
 The goal is Direct Play: MP4 + a codec your client already speaks means Plex streams the file untouched instead of burning CPU on a transcode.
+
+## Truncated Instructions
+
+1. Install ffmpeg
+2. Drag .mkv media file onto .bat file script
+3. Check output
 
 ## What it does
 

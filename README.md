@@ -1,4 +1,9 @@
 # Remux-MKV-to-MP4-with-Plex-Compatibility
+
+[![Windows](https://img.shields.io/badge/Windows-only-blue)](https://www.microsoft.com/windows/)
+[![ffmpeg](https://img.shields.io/badge/requires-ffmpeg-green)](https://ffmpeg.org/)
+
+
 This .bat file uses ffmpeg to remux .mkv files with proper audio and video codecs, containing them in a .mp4 container, extracting all subtitle tracks into appropriate sidecar .srt files, and finally deleting the main .mkv file after verification that the process was completed successfully.
 
 There are variables to change the delete mode (keep, recycle, permanant), number of audio tracks kept, subtitle extraction preference, subtitle extraction type, image subtitle extraction preference, and tolerance between the input and output duration. The AI explanation below delves into this further as well as how to edit these variables.
